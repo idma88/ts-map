@@ -1,76 +1,65 @@
-## Euro Truck Simulator 2 / American Truck Simulator Map Renderer
+# Euro Truck Simulator 2 / American Truck Simulator Map Renderer
 
-This Application reads ATS/ETS2 files to draw roads, prefabs, (some) map overlays and city names.
+This Application reads ATS/ETS2 files to draw roads, prefabs, map overlays, ferry lines and city names.
 
-### Supported maps / DLC
+![Preview of the map](/docs/preview.jpg "Preview of the map")
+
+### **Support for 1.36, Utah & Road to the Black Sea DLC**
+
+## Export Maps
+Can now export maps as a tiled web map.
+
+[Example with a max zoom level of 4](https://dariowouters.github.io/ts-tile-map-example/)
+
+##### [Source](https://github.com/dariowouters/ts-tile-map-example)
+## Map mod support
+It can now load map mods.
+
+Making all/specific map mods supported won't be a priority for me.
+
+### Tested* map mods:
+
+ETS2:
+- Promods V2.42
+- Rusmap V1.8.1
+- The Great Steppe V1.2
+- Paris Rebuild V2.3
+- ScandinaviaMod V0.4
+- Emden V1.02c (Doesn't show city name)
+- Sardinia map V0.9 (Can't load some dds files)
+- PJ Indo Map v2.5 (Can't load an overlay)
+
+ATS:
+- Coast to Coast V2.6 (Can't load some dds files)
+- US Expansion V2.4 (C2C Compatible)
+- CanaDream Open Beta (ATS 1.32)
+- Tonopah REBUILT V1.0.2
+- Mexico Extremo 2.0.5
+- Viva Mexico v2.4.8
+
+\* The tested mods load and get drawn but I haven't looked at anything specific so it's always possible there will be some items missing or things will get drawn that shouldn't.
+
+## Supported maps / DLC
 - ATS
     - Base
     - Nevada
     - Arizona
     - New Mexico
+    - Oregon
+    - Washington
+    - Utah
 - ETS2
     - Base
     - Going East!
     - Scandinavia
     - Vive la France !
     - Italia
+    - Beyond the Baltic Sea
+    - Road to the Black Sea
 
-### Setting up
-#### Folder structure
-```
-map_data_directory (the directory you set in TsMapCanvas.cs)
-├───LUT
-│       cities.json
-│       overlays.json
-│       prefabs.json
-│       roads.json
-└───SCS
-    ├───LUT
-    │   └───road
-    │           road_look.sii
-    │           road_look.template.dlc_fr.sii
-    │           road_look.template.sii
-    ├───map
-    │       all *.base files
-    ├───overlay
-    │       *.dds map icon files
-    └───prefab
-            all *.ppd files in subfolders
-```
+#### Dependencies (NuGet)
+- [DotNetZip](https://www.nuget.org/packages/DotNetZip/)
+- [Newtonsoft.Json](https://www.nuget.org/packages/Newtonsoft.Json)
 
-In order to run the program, you'll need to manually extract some \*.scs files.
-
-Use the [SCS extractor](http://modding.scssoft.com/wiki/Documentation/Tools/Game_Archive_Extractor) to extract \*.SCS files.
-
-Files you'll have to extract:
-- base.scs
-- def.scs
-- Any map dlc you want to render (e.g. dlc_fr.scs)
-
-Easy way to copy all \*.ppd files (command-line) `Robocopy c:\source\ c:\destination\ *.ppd /E`
-
-- Base map
-    - Map data
-        - This is located in base.scs at map/europe/ or map/usa/
-        - Put all \*.base files in SCS/map/
-    - Overlays
-        - Located in base/material/ui/map/road/ and in base/material/ui/company/small/
-        - Put all \*.dds files in SCS/overlay/
-    - Prefab information
-        - Also located in base.scs, copy all \*.ppd files (with directories) from prefab/ and prefab2/ to SCS/prefab/
-    - Sii road look files
-        - Located in def.scs at def/world/
-        - Copy road_look.sii and road_look.template.sii to SCS/LUT/road/
-
-
-- DLC (Vive la France ! as an example)
-    - Raw map information
-        - This is located in dlc_fr.scs at map/europe/
-        - Put all \*.base files in SCS/map/
-    - Prefab information **(some DLC won't have these)**
-        - Also located in dlc_fr.scs, copy all \*.ppd files (with directories) from prefab2/ to SCS/prefab/
-    - Sii road look files **(some DLC won't have these)**
-        - Also Located in dlc_fr.scs at def/world/
-        - Copy road_look.sii and road_look.template.sii to SCS/LUT/road/
-
+#### Based on
 [Original project](https://github.com/nlhans/ets2-map)

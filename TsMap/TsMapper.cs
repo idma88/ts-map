@@ -1,339 +1,532 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
+using TsMap.HashFiles;
+using TsMap.TsItem;
 
 namespace TsMap
 {
     public class TsMapper
     {
-        private readonly string _prefabDir;
-        private readonly string _jsonLutDir;
-        private readonly string _siiLutDir;
+        private readonly string _gameDir;
+        public Settings AppSettings { get; set; }
+        private List<Mod> _mods;
 
-        private readonly string[] _sectorFiles;
-        private readonly string[] _overlayFiles;
+        public RootFileSystem Rfs;
+        public bool IsEts2 = true;
+
+        private List<string> _sectorFiles;
+        public int SelectedLocalization = 0;
+        public List<string> LocalizationList = new List<string>();
+
+        public Dictionary<string, string> LocalizedNames = new Dictionary<string, string>();
 
         private readonly Dictionary<ulong, TsPrefab> _prefabLookup = new Dictionary<ulong, TsPrefab>();
-        private readonly Dictionary<ulong, string> _citiesLookup = new Dictionary<ulong, string>();
-        private readonly List<TsRoadLook> _roadLookLookup = new List<TsRoadLook>();
+        private readonly Dictionary<ulong, TsCity> _citiesLookup = new Dictionary<ulong, TsCity>();
         private readonly Dictionary<ulong, TsRoadLook> _roadLookup = new Dictionary<ulong, TsRoadLook>();
         private readonly Dictionary<ulong, TsMapOverlay> _overlayLookup = new Dictionary<ulong, TsMapOverlay>();
+        private readonly List<TsFerryConnection> _ferryConnectionLookup = new List<TsFerryConnection>();
 
         public readonly List<TsRoadItem> Roads = new List<TsRoadItem>();
         public readonly List<TsPrefabItem> Prefabs = new List<TsPrefabItem>();
+        public readonly List<TsMapAreaItem> MapAreas = new List<TsMapAreaItem>();
         public readonly List<TsCityItem> Cities = new List<TsCityItem>();
         public readonly List<TsMapOverlayItem> MapOverlays = new List<TsMapOverlayItem>();
-        public readonly List<TsFerryItem> Ferries = new List<TsFerryItem>();
+        public readonly List<TsFerryItem> FerryConnections = new List<TsFerryItem>();
         public readonly List<TsCompanyItem> Companies = new List<TsCompanyItem>();
-
+        public readonly List<TsTriggerItem> Triggers = new List<TsTriggerItem>();
 
         public readonly Dictionary<ulong, TsNode> Nodes = new Dictionary<ulong, TsNode>();
 
+        public float minX = float.MaxValue;
+        public float maxX = float.MinValue;
+        public float minZ = float.MaxValue;
+        public float maxZ = float.MinValue;
+
         private List<TsSector> Sectors { get; set; }
 
-        public TsMapper(string sectorDir, string scsFilesDir, string siiLutDir, string jsonLutDir)
+        public TsMapper(string gameDir, List<Mod> mods)
         {
-            _prefabDir = scsFilesDir + "prefab/";
-            _siiLutDir = siiLutDir;
-            _jsonLutDir = jsonLutDir;
+            _gameDir = gameDir;
+            _mods = mods;
+            Sectors = new List<TsSector>();
+            LocalizationList.Add("None");
+        }
 
-            if (!Directory.Exists(sectorDir))
+        private void ParseCityFiles()
+        {
+            var defDirectory = Rfs.GetDirectory("def");
+            if (defDirectory == null)
             {
-                Log.Msg("Could not find the Sector Dir.");
+                Log.Msg("Could not read 'def' dir");
                 return;
             }
-            _sectorFiles = Directory.GetFiles(sectorDir, "*.base");
-            if (Directory.Exists(scsFilesDir + "overlay/"))
-                _overlayFiles = Directory.GetFiles(scsFilesDir + "overlay/", "*.dds");
 
-        }
-
-        public TsMapper(string mainDir) : this(mainDir + @"SCS/map/", mainDir + @"SCS/", mainDir + @"SCS/LUT/", mainDir + @"LUT/")
-        {
-           
-        }
-
-        private void LoadLut()
-        {
-            // PREFABS
-            var prefabJson = _jsonLutDir + "prefabs.json";
-
-            if (File.Exists(prefabJson))
+            var cityFiles = defDirectory.GetFiles("city");
+            if (cityFiles == null)
             {
-                var lines = File.ReadAllLines(prefabJson);
-                var filePath = "";
-                ulong token = 0;
+                Log.Msg("Could not read city files");
+                return;
+            }
+
+            foreach (var cityFile in cityFiles)
+            {
+                var data = cityFile.Entry.Read();
+                var lines = Encoding.UTF8.GetString(data).Split('\n');
                 foreach (var line in lines)
                 {
-                    if (line.Trim() == "]")
+                    if (line.TrimStart().StartsWith("#")) continue;
+                    if (line.Contains("@include"))
                     {
-                        break;
-                    }
-                    if (line.Contains("token"))
-                    {
-                        token = ulong.Parse(line.Split(':')[1].Split('"')[1], NumberStyles.HexNumber);
-                    }
-                    if (line.Contains("prefab_desc"))
-                    {
-                        filePath = line.Split(':')[1].Split('"')[1];
-                    }
-                    if (line.Contains("}"))
-                    {
-                        if (token != 0 && filePath != "")
+                        var path = Helper.GetFilePath(line.Split('"')[1], "def");
+                        var city = new TsCity(this, path);
+                        if (city.Token != 0 && !_citiesLookup.ContainsKey(city.Token))
                         {
-                            filePath = filePath.Substring(filePath.IndexOf('/', 1) + 1);
-                            if (File.Exists(_prefabDir + filePath))
-                            {
-                                _prefabLookup.Add(token, new TsPrefab(_prefabDir + filePath));
-                            }
+                            _citiesLookup.Add(city.Token, city);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void ParsePrefabFiles()
+        {
+            var worldDirectory = Rfs.GetDirectory("def/world");
+            if (worldDirectory == null)
+            {
+                Log.Msg("Could not read 'def/world' dir");
+                return;
+            }
+
+            var prefabFiles = worldDirectory.GetFiles("prefab");
+            if (prefabFiles == null)
+            {
+                Log.Msg("Could not read prefab files");
+                return;
+            }
+
+            foreach (var prefabFile in prefabFiles)
+            {
+                var data = prefabFile.Entry.Read();
+                var lines = Encoding.UTF8.GetString(data).Split('\n');
+
+                var token = 0UL;
+                var path = "";
+                var category = "";
+
+                foreach (var line in lines)
+                {
+                    if (line.TrimStart().StartsWith("#")) continue;
+                    if (line.Contains("prefab_model"))
+                    {
+                        token = ScsHash.StringToToken(line.Split('.')[1].Trim());
+                    }
+                    else if (line.Contains("prefab_desc"))
+                    {
+                        path = Helper.GetFilePath(line.Split('"')[1]);
+                    }
+                    else if (line.Contains("category"))
+                    {
+                        category = line.Split('"')[1];
+                    }
+
+                    if (line.Contains("}") && token != 0 && path != "")
+                    {
+                        var prefab = new TsPrefab(this, path, token, category);
+                        if (prefab.Token != 0 && !_prefabLookup.ContainsKey(prefab.Token))
+                        {
+                            _prefabLookup.Add(prefab.Token, prefab);
                         }
 
-                        filePath = "";
                         token = 0;
+                        path = "";
+                        category = "";
                     }
                 }
-
-            }
-            else
-            {
-                Log.Msg($"Cannot find file: {prefabJson}");
-            }
-
-            // CITIES
-            if (File.Exists(_jsonLutDir + "cities.json"))
-            {
-
-                var lines = File.ReadAllLines(_jsonLutDir + "cities.json");
-                var cityName = "";
-                ulong token = 0;
-                foreach (var line in lines)
-                {
-                    if (line.Trim() == "]")
-                    {
-                        break;
-                    }
-                    if (line.Contains(":"))
-                    {
-                        var k = line.Split(':')[0].Split('"')[1];
-                        var v = line.Split(':')[1].Split('"')[1];
-
-                        switch (k)
-                        {
-                            case "token":
-                                token = ulong.Parse(v, NumberStyles.HexNumber);
-                                break;
-                            case "fullName":
-                                cityName = v;
-                                break;
-                        }
-                    }
-                    if (!line.Contains("}")) continue;
-                    if (token != 0 && cityName != "")
-                    {
-                        _citiesLookup.Add(token, cityName);
-                    }
-
-                    cityName = "";
-                    token = 0;
-                }
-            }
-            else
-            {
-                Log.Msg($"Cannot find file: {_jsonLutDir + "cities.json"}");
-            }
-
-            // ROAD LOOKS
-            var roadsJson = _jsonLutDir + "roads.json";
-            if (File.Exists(roadsJson))
-            {
-                var lines = File.ReadAllLines(roadsJson);
-                var idName = "";
-                ulong token = 0;
-                foreach (var line in lines)
-                {
-                    if (line.Trim() == "]")
-                    {
-                        break;
-                    }
-                    if (line.Contains(":"))
-                    {
-                        var k = line.Split(':')[0].Split('"')[1];
-                        var v = line.Split(':')[1].Split('"')[1];
-
-                        switch (k)
-                        {
-                            case "token":
-                                token = ulong.Parse(v, NumberStyles.HexNumber);
-                                break;
-                            case "idName":
-                                idName = v;
-                                break;
-                        }
-                    }
-
-                    if (!line.Contains("}")) continue;
-                    if (token != 0 && idName != "")
-                    {
-                        var obj = _roadLookLookup.FirstOrDefault(x => x.LookId == idName);
-                        if (obj != null)
-                        {
-                            _roadLookup.Add(token, obj);
-                        }
-                    }
-
-                    idName = "";
-                    token = 0;
-                }
-
-                _roadLookLookup.Clear();
-            }
-            else
-            {
-                Log.Msg($"Cannot find file: {roadsJson}");
-            }
-
-            // OVERLAYS
-            var overlaysJson = _jsonLutDir + "overlays.json";
-            if (File.Exists(overlaysJson) && _overlayFiles.Length != 0)
-            {
-                var lines = File.ReadAllLines(overlaysJson);
-                var idName = "";
-                ulong token = 0;
-                foreach (var line in lines)
-                {
-                    if (line.Trim() == "]")
-                    {
-                        break;
-                    }
-                    if (line.Contains(":"))
-                    {
-                        var k = line.Split(':')[0].Split('"')[1];
-                        var v = line.Split(':')[1].Split('"')[1];
-
-                        switch (k)
-                        {
-                            case "token":
-                                token = ulong.Parse(v, NumberStyles.HexNumber);
-                                break;
-                            case "idName":
-                                idName = v;
-                                break;
-                        }
-                    }
-
-                    if (!line.Contains("}")) continue;
-                    if (token != 0 && idName != "")
-                    {
-                        var file = _overlayFiles.FirstOrDefault(x => x.Contains(idName));
-                        if (file != null && !_overlayLookup.ContainsKey(token))
-                        {
-                            _overlayLookup.Add(token, new TsMapOverlay(file));
-                        }
-                    }
-
-                    idName = "";
-                    token = 0;
-                }
-            }
-            else
-            {
-                Log.Msg($"Cannot find file: {overlaysJson}");
             }
         }
 
         private void ParseRoadLookFiles()
         {
-            if (!Directory.Exists(_siiLutDir + @"road\"))
+            var worldDirectory = Rfs.GetDirectory("def/world");
+            if (worldDirectory == null)
             {
-                Log.Msg("No roadlook files found");
+                Log.Msg("Could not read 'def/world' dir");
                 return;
             }
-            var roadLookFiles = Directory.GetFiles(_siiLutDir + @"road\", "*.sii");
 
-            roadLookFiles.ToList().ForEach(file =>
+            var roadLookFiles = worldDirectory.GetFiles("road_look");
+            if (roadLookFiles == null)
             {
-                var road = String.Empty;
-                var fileData = File.ReadLines(file);
-                TsRoadLook look = null;
-                foreach (var k in fileData)
-                {
-                    if (k.Contains(":") && !road.Equals(String.Empty) && look != null)
-                    {
-                        var key = k;
-                        var data = key.Substring(key.IndexOf(':') + 1).Trim();
-                        key = key.Substring(0, key.IndexOf(':')).Trim();
+                Log.Msg("Could not read road look files");
+                return;
+            }
 
+            foreach (var roadLookFile in roadLookFiles)
+            {
+                var data = roadLookFile.Entry.Read();
+                var lines = Encoding.UTF8.GetString(data).Split('\n');
+                TsRoadLook roadLook = null;
+
+                foreach (var line in lines)
+                {
+                    if (line.TrimStart().StartsWith("#")) continue;
+                    if (line.Contains(":") && roadLook != null)
+                    {
+                        var value = line.Substring(line.IndexOf(':') + 1).Trim();
+                        var key = line.Substring(0, line.IndexOf(':')).Trim();
                         switch (key)
                         {
-                            case "road_size_left":
-                                float.TryParse(data.Replace('.', ','), out look.SizeLeft);
-                                break;
-
-                            case "road_size_right":
-                                float.TryParse(data.Replace('.', ','), out look.SizeRight);
-                                break;
-
-                            case "shoulder_size_right":
-                                float.TryParse(data.Replace('.', ','), out look.ShoulderLeft);
-                                break;
-
-                            case "shoulder_size_left":
-                                float.TryParse(data.Replace('.', ','), out look.ShoulderRight);
-                                break;
-
-                            case "road_offset":
-                                float.TryParse(data.Replace('.', ','), out look.Offset);
-                                break;
                             case "lanes_left[]":
-                                look.LanesLeft.Add(data);
+                                roadLook.LanesLeft.Add(value);
                                 break;
 
                             case "lanes_right[]":
-                                look.LanesRight.Add(data);
+                                roadLook.LanesRight.Add(value);
+                                break;
+                            case "road_offset":
+                                float.TryParse(value.Replace('.', ','), out roadLook.Offset);
                                 break;
                         }
                     }
-                    if (k.StartsWith("road_look"))
+
+                    if (line.Contains("road_look"))
                     {
-                        var d = k.Split(':');
-                        d[1] = d[1].Trim();
-                        if (d[1].Length > 3)
+                        roadLook = new TsRoadLook(ScsHash.StringToToken(line.Split('.')[1].Trim('{').Trim()));
+                    }
+
+                    if (line.Contains("}") && roadLook != null)
+                    {
+                        if (roadLook.Token != 0 && !_roadLookup.ContainsKey(roadLook.Token))
                         {
-                            road = d[1].Substring(0, d[1].Length - 1).Trim();
-                            look = new TsRoadLook(road);
+                            _roadLookup.Add(roadLook.Token, roadLook);
+                            roadLook = null;
                         }
                     }
-                    if (k.Trim() != "}") continue;
-                    if (look != null && !_roadLookLookup.Contains(look))
-                    {
-                        _roadLookLookup.Add(look);
-                    }
-                    road = String.Empty;
                 }
-            });
+            }
         }
 
-        public void Parse()
+        private void ParseFerryConnections()
         {
-            ParseRoadLookFiles();
-            Log.Msg($"RoadLook Count: {_roadLookLookup.Count}");
-            LoadLut();
-            Log.Msg($"Roads Count: {_roadLookup.Count}");
-            Log.Msg($"Prefabs Count: {_prefabLookup.Count}");
-            Log.Msg($"Cities Count: {_citiesLookup.Count}");
-
-            if (_sectorFiles == null)
+            var connectionDirectory = Rfs.GetDirectory("def/ferry/connection");
+            if (connectionDirectory == null)
             {
-                Log.Msg("No Map file(s) found.");
+                Log.Msg("Could not read 'def/ferry/connection' dir");
                 return;
             }
+
+            var ferryConnectionFiles = connectionDirectory.GetFiles("sii");
+            if (ferryConnectionFiles == null)
+            {
+                Log.Msg("Could not read ferry connection files files");
+                return;
+            }
+
+            foreach (var ferryConnectionFile in ferryConnectionFiles)
+            {
+                var data = ferryConnectionFile.Entry.Read();
+                var lines = Encoding.UTF8.GetString(data).Split('\n');
+
+                TsFerryConnection conn = null;
+
+                foreach (var line in lines)
+                {
+                    if (line.TrimStart().StartsWith("#")) continue;
+                    if (line.Contains(":"))
+                    {
+                        var value = line.Split(':')[1].Trim();
+                        var key = line.Split(':')[0].Trim();
+                        if (conn != null)
+                        {
+                            if (key.Contains("connection_positions"))
+                            {
+                                var index = int.Parse(key.Split('[')[1].Split(']')[0]);
+                                var vector = value.Split('(')[1].Split(')')[0];
+                                var values = vector.Split(',');
+                                var x = float.Parse(values[0].Replace('.', ','));
+                                var z = float.Parse(values[2].Replace('.', ','));
+                                conn.AddConnectionPosition(index, x, z);
+                            }
+                            else if (key.Contains("connection_directions"))
+                            {
+                                var index = int.Parse(key.Split('[')[1].Split(']')[0]);
+                                var vector = value.Split('(')[1].Split(')')[0];
+                                var values = vector.Split(',');
+                                var x = float.Parse(values[0].Replace('.', ','));
+                                var z = float.Parse(values[2].Replace('.', ','));
+                                conn.AddRotation(index, Math.Atan2(z, x));
+                            }
+                        }
+
+                        if (line.Contains("ferry_connection"))
+                        {
+                            var portIds = value.Split('.');
+                            conn = new TsFerryConnection
+                            {
+                                StartPortToken = ScsHash.StringToToken(portIds[1]),
+                                EndPortToken = ScsHash.StringToToken(portIds[2].TrimEnd('{').Trim())
+                            };
+                        }
+                    }
+
+                    if (!line.Contains("}") || conn == null) continue;;
+
+                    var existingItem = _ferryConnectionLookup.FirstOrDefault(item =>
+                        (item.StartPortToken == conn.StartPortToken && item.EndPortToken == conn.EndPortToken) ||
+                        (item.StartPortToken == conn.EndPortToken && item.EndPortToken == conn.StartPortToken)); // Check if connection already exists
+                    if (existingItem == null) _ferryConnectionLookup.Add(conn);
+                    conn = null;
+                }
+            }
+        }
+
+        private void ParseOverlays()
+        {
+            var uiMapDirectory = Rfs.GetDirectory("material/ui/map");
+            if (uiMapDirectory == null)
+            {
+                Log.Msg("Could not read 'material/ui/map' dir");
+                return;
+            }
+
+            var matFiles = uiMapDirectory.GetFiles(".mat");
+            if (matFiles == null)
+            {
+                Log.Msg("Could not read .mat files");
+                return;
+            }
+
+            var uiMapRoadDirectory = Rfs.GetDirectory("material/ui/map/road");
+            if (uiMapRoadDirectory != null)
+            {
+                var data = uiMapRoadDirectory.GetFiles(".mat");
+                if (data != null) matFiles.AddRange(data);
+            }
+            else
+            {
+                Log.Msg("Could not read 'material/ui/map/road' dir");
+            }
+
+            var uiCompanyDirectory = Rfs.GetDirectory("material/ui/company/small");
+            if (uiCompanyDirectory != null)
+            {
+                var data = uiCompanyDirectory.GetFiles(".mat");
+                if (data != null) matFiles.AddRange(data);
+            }
+            else
+            {
+                Log.Msg("Could not read 'material/ui/company/small' dir");
+            }
+
+            foreach (var matFile in matFiles)
+            {
+                var data = matFile.Entry.Read();
+                var lines = Encoding.UTF8.GetString(data).Split('\n');
+
+                foreach (var line in lines)
+                {
+                    if (line.TrimStart().StartsWith("#")) continue;
+                    if (line.Contains("texture") && !line.Contains("_name"))
+                    {
+                        var tobjPath = Helper.CombinePath(matFile.GetLocalPath(), line.Split('"')[1]);
+
+                        var tobjData = Rfs.GetFileEntry(tobjPath)?.Entry?.Read();
+
+                        if (tobjData == null) break;
+
+                        var path = Helper.GetFilePath(Encoding.UTF8.GetString(tobjData, 0x30, tobjData.Length - 0x30));
+
+                        var name = matFile.GetFileName();
+                        if (name.StartsWith("map")) continue;
+                        if (name.StartsWith("road_")) name = name.Substring(5);
+
+                        var token = ScsHash.StringToToken(name);
+                        if (!_overlayLookup.ContainsKey(token))
+                        {
+                            _overlayLookup.Add(token, new TsMapOverlay(this, path));
+                        }
+
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Parse all definition files
+        /// </summary>
+        private void ParseDefFiles()
+        {
             var startTime = DateTime.Now.Ticks;
+            ParseCityFiles();
+            Log.Msg($"Loaded city files in {(DateTime.Now.Ticks - startTime) / TimeSpan.TicksPerMillisecond}ms");
+
+            startTime = DateTime.Now.Ticks;
+            ParsePrefabFiles();
+            Log.Msg($"Loaded prefab files in {(DateTime.Now.Ticks - startTime) / TimeSpan.TicksPerMillisecond}ms");
+
+            startTime = DateTime.Now.Ticks;
+            ParseRoadLookFiles();
+            Log.Msg($"Loaded road files in {(DateTime.Now.Ticks - startTime) / TimeSpan.TicksPerMillisecond}ms");
+
+            startTime = DateTime.Now.Ticks;
+            ParseFerryConnections();
+            Log.Msg($"Loaded ferry files in {(DateTime.Now.Ticks - startTime) / TimeSpan.TicksPerMillisecond}ms");
+
+            startTime = DateTime.Now.Ticks;
+            ParseOverlays();
+            Log.Msg($"Loaded overlay files in {(DateTime.Now.Ticks - startTime) / TimeSpan.TicksPerMillisecond}ms");
+        }
+
+        /// <summary>
+        /// Parse all .base files
+        /// </summary>
+        private void ParseMapFiles()
+        {
+            var baseMapEntry = Rfs.GetDirectory("map");
+            if (baseMapEntry == null)
+            {
+                Log.Msg("Could not read 'map' dir");
+                return;
+            }
+
+            var mbd = baseMapEntry.Files.Values.Where(x => x.GetExtension().Equals("mbd")).ToList(); // Get the map names from the mbd files
+            if (mbd.Count == 0)
+            {
+                Log.Msg("Could not find mbd file");
+                return;
+            }
+
+            _sectorFiles = new List<string>();
+
+            foreach (var file in mbd)
+            {
+                var mapName = file.GetFileName();
+                IsEts2 = !(mapName == "usa");
+
+                var mapFileDir = Rfs.GetDirectory($"map/{mapName}");
+                if (mapFileDir == null)
+                {
+                    Log.Msg($"Could not read 'map/{mapName}' directory");
+                    return;
+                }
+
+                _sectorFiles.AddRange(mapFileDir.GetFiles(".base").Select(x => x.GetPath()).ToList());
+            }
+        }
+
+        private void ReadLocalizationOptions()
+        {
+            var localeDir = Rfs.GetDirectory("locale");
+            if (localeDir == null)
+            {
+                Log.Msg("Could not find locale directory.");
+                return;
+            }
+            foreach (var localeDirDirectory in localeDir.Directories)
+            {
+                LocalizationList.Add(localeDirDirectory.Value.GetCurrentDirectoryName());
+            }
+        }
+
+        /// <summary>
+        /// Parse through all .scs files and retreive all necessary files
+        /// </summary>
+        public void Parse()
+        {
+            var startTime = DateTime.Now.Ticks;
+
+            if (!Directory.Exists(_gameDir))
+            {
+                Log.Msg("Could not find Game directory.");
+                return;
+            }
+
+            Rfs = new RootFileSystem(_gameDir);
+
+            _mods.Reverse(); // Highest priority mods (top) need to be loaded last
+
+            foreach (var mod in _mods)
+            {
+                if (mod.Load) Rfs.AddSourceFile(mod.ModPath);
+            }
+
+            Log.Msg($"Loaded all .scs files in {(DateTime.Now.Ticks - startTime) / TimeSpan.TicksPerMillisecond}ms");
+
+            ReadLocalizationOptions();
+
+            ParseDefFiles();
+            ParseMapFiles();
+
+
+            if (_sectorFiles == null) return;
+
+            var preMapParseTime = DateTime.Now.Ticks;
             Sectors = _sectorFiles.Select(file => new TsSector(this, file)).ToList();
             Sectors.ForEach(sec => sec.Parse());
             Sectors.ForEach(sec => sec.ClearFileData());
-            Log.Msg($"It took {(DateTime.Now.Ticks - startTime) / TimeSpan.TicksPerMillisecond} ms to parse all (*.base) map files");
+            Log.Msg($"It took {(DateTime.Now.Ticks - preMapParseTime) / TimeSpan.TicksPerMillisecond} ms to parse all (*.base)" +
+                    $" map files and {(DateTime.Now.Ticks - startTime) / TimeSpan.TicksPerMillisecond} ms total.");
+        }
+
+        public void UpdateLocalization(int locIndex)
+        {
+            LocalizedNames = new Dictionary<string, string>();
+            if (locIndex < 0) return;
+            SelectedLocalization = locIndex;
+            if (locIndex == 0 || locIndex >= LocalizationList.Count) return;
+            var localFile = Rfs.GetFileEntry($"locale/{LocalizationList[locIndex]}/local.sii");
+            if (localFile == null)
+            {
+                Log.Msg($"Could not find locale file for '{LocalizationList[locIndex]}'");
+                return;
+            }
+
+            var fileContents = Helper.Decrypt3Nk(localFile.Entry.Read());
+            if (fileContents == null)
+            {
+                Log.Msg($"Could not decrypt locale file '{localFile.GetPath()}'");
+                return;
+            }
+
+            var key = string.Empty;
+            var saveValues = false;
+
+            foreach (var l in fileContents.Split('\n'))
+            {
+                if (l.Contains("#+ Names of cities")) saveValues = true;
+                if (!saveValues) continue;
+                if (l.Contains("#@}")) break;
+                if(!l.Contains(':')) continue;
+
+
+                if (l.Contains("key[]"))
+                {
+                    key = l.Split('"')[1];
+                }
+                else if (l.Contains("val[]"))
+                {
+                    var val = l.Split('"')[1];
+                    if (key != string.Empty && val != string.Empty)
+                    {
+                        if (!LocalizedNames.ContainsKey(key))
+                        {
+                            LocalizedNames.Add(key, val);
+                        }
+                    }
+                    key = string.Empty;
+                }
+            }
+        }
+
+        public void UpdateEdgeCoords(TsNode node)
+        {
+            if (minX > node.X) minX = node.X;
+            if (maxX < node.X) maxX = node.X;
+            if (minZ > node.Z) minZ = node.Z;
+            if (maxZ < node.Z) maxZ = node.Z;
         }
 
         public TsNode GetNodeByUid(ulong uid)
@@ -351,14 +544,33 @@ namespace TsMap
             return _prefabLookup.ContainsKey(prefabId) ? _prefabLookup[prefabId] : null;
         }
 
-        public string LookupCity(ulong cityId)
+        public TsCity LookupCity(ulong cityId)
         {
             return _citiesLookup.ContainsKey(cityId) ? _citiesLookup[cityId] : null;
+        }
+
+        public string GetLocalizedName(string template)
+        {
+            return LocalizedNames.FirstOrDefault(x => x.Key == template).Value;
         }
 
         public TsMapOverlay LookupOverlay(ulong overlayId)
         {
             return _overlayLookup.ContainsKey(overlayId) ? _overlayLookup[overlayId] : null;
+        }
+
+        public List<TsFerryConnection> LookupFerryConnection(ulong ferryPortId)
+        {
+            return _ferryConnectionLookup.Where(item => item.StartPortToken == ferryPortId).ToList();
+        }
+
+        public void AddFerryPortLocation(ulong ferryPortId, float x, float z)
+        {
+            var ferry = _ferryConnectionLookup.Where(item => item.StartPortToken == ferryPortId || item.EndPortToken == ferryPortId);
+            foreach (var connection in ferry)
+            {
+                connection.SetPortLocation(ferryPortId, x, z);
+            }
         }
     }
 }

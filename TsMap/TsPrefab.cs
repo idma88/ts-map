@@ -1,7 +1,6 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Drawing;
-using System.IO;
+using System.Linq;
 
 namespace TsMap
 {
@@ -11,6 +10,7 @@ namespace TsMap
         public float Z;
         public float RotX;
         public float RotZ;
+        public int LaneCount;
     }
 
     public struct TsMapPoint
@@ -23,65 +23,141 @@ namespace TsMap
         public byte PrefabColorFlags;
         public int NeighbourCount;
         public List<int> Neighbours;
+        public sbyte ControlNodeIndex;
+    }
+
+    public class TsSpawnPoint
+    {
+        public float X;
+        public float Z;
+        public TsSpawnPointType Type;
+    }
+
+    public class TsTriggerPoint
+    {
+        public uint TriggerId;
+        public ulong TriggerActionUid;
+        public float X;
+        public float Z;
     }
 
     public class TsPrefab
     {
         private const int NodeBlockSize = 0x68;
         private const int MapPointBlockSize = 0x30;
+        private const int SpawnPointBlockSize = 0x20;
+        private const int TriggerPointBlockSize = 0x30;
 
-        private string _filePath;
+        public string FilePath { get; }
+        public ulong Token { get; }
+        public string Category { get; }
 
         private byte[] _stream;
 
+        public bool ValidRoad { get; private set; }
+
         public List<TsPrefabNode> PrefabNodes { get; private set; }
+        public List<TsSpawnPoint> SpawnPoints { get; private set; }
         public List<TsMapPoint> MapPoints { get; private set; }
+        public List<TsTriggerPoint> TriggerPoints { get; private set; }
 
-        public TsPrefab(string filePath)
+        public TsPrefab(TsMapper mapper, string filePath, ulong token, string category)
         {
-            _filePath = filePath;
+            FilePath = filePath;
+            Token = token;
+            Category = category;
 
-            if (!File.Exists(filePath)) return;
-            _stream = File.ReadAllBytes(filePath);
+            var file = mapper.Rfs.GetFileEntry(FilePath);
+
+            if (file == null) return;
+
+            _stream = file.Entry.Read();
+
             Parse();
         }
 
         private void Parse()
         {
             PrefabNodes = new List<TsPrefabNode>();
+            SpawnPoints = new List<TsSpawnPoint>();
             MapPoints = new List<TsMapPoint>();
+            TriggerPoints = new List<TsTriggerPoint>();
 
             var fileOffset = 0x0;
 
-            var version = BitConverter.ToInt32(_stream, fileOffset);
+            var version = MemoryHelper.ReadInt32(_stream, fileOffset);
+
+            if (version < 0x15)
+            {
+                Log.Msg($"{FilePath} file version ({version}) too low, min. is {0x15}");
+                return;
+            }
 
             var nodeCount = BitConverter.ToInt32(_stream, fileOffset += 0x04);
-            var mapPointCount = BitConverter.ToInt32(_stream, fileOffset += 0x1C);
+            var navCurveCount = BitConverter.ToInt32(_stream, fileOffset += 0x04);
+            ValidRoad = navCurveCount != 0;
+            var spawnPointCount = BitConverter.ToInt32(_stream, fileOffset += 0x0C);
+            var mapPointCount = BitConverter.ToInt32(_stream, fileOffset += 0x0C);
+            var triggerPointCount = BitConverter.ToInt32(_stream, fileOffset += 0x04);
 
             if (version > 0x15) fileOffset += 0x04; // http://modding.scssoft.com/wiki/Games/ETS2/Modding_guides/1.30#Prefabs
 
-            var nodeOffset = BitConverter.ToInt32(_stream, fileOffset += 0x0C);
-            var mapPointOffset = BitConverter.ToInt32(_stream, fileOffset + 0x20);
+            var nodeOffset = MemoryHelper.ReadInt32(_stream, fileOffset += 0x08);
+            var spawnPointOffset = MemoryHelper.ReadInt32(_stream, fileOffset += 0x10);
+            var mapPointOffset = MemoryHelper.ReadInt32(_stream, fileOffset += 0x10);
+            var triggerPointOffset = MemoryHelper.ReadInt32(_stream, fileOffset += 0x04);
 
             for (var i = 0; i < nodeCount; i++)
             {
                 var nodeBaseOffset = nodeOffset + (i * NodeBlockSize);
                 var node = new TsPrefabNode
                 {
-                    X = BitConverter.ToSingle(_stream, nodeBaseOffset + 0x10),
-                    Z = BitConverter.ToSingle(_stream, nodeBaseOffset + 0x18),
-                    RotX = BitConverter.ToSingle(_stream, nodeBaseOffset + 0x1C),
-                    RotZ = BitConverter.ToSingle(_stream, nodeBaseOffset + 0x24),
+                    X = MemoryHelper.ReadSingle(_stream, nodeBaseOffset + 0x10),
+                    Z = MemoryHelper.ReadSingle(_stream, nodeBaseOffset + 0x18),
+                    RotX = MemoryHelper.ReadSingle(_stream, nodeBaseOffset + 0x1C),
+                    RotZ = MemoryHelper.ReadSingle(_stream, nodeBaseOffset + 0x24),
                 };
+
+                int laneCount = 0;
+                var nodeFileOffset = nodeBaseOffset + 0x24;
+                for (var j = 0; j < 8; j++)
+                {
+                    if (MemoryHelper.ReadInt32(_stream, nodeFileOffset += 0x04) != -1) laneCount++;
+                }
+
+                for (var j = 0; j < 8; j++)
+                {
+                    if (MemoryHelper.ReadInt32(_stream, nodeFileOffset += 0x04) != -1) laneCount++;
+                }
+                node.LaneCount = laneCount;
+
                 PrefabNodes.Add(node);
+            }
+
+            for (var i = 0; i < spawnPointCount; i++)
+            {
+                var spawnPointBaseOffset = spawnPointOffset + (i * SpawnPointBlockSize);
+                var spawnPoint = new TsSpawnPoint
+                {
+                    X = MemoryHelper.ReadSingle(_stream, spawnPointBaseOffset),
+                    Z = MemoryHelper.ReadSingle(_stream, spawnPointBaseOffset + 0x08),
+                    Type = (TsSpawnPointType)MemoryHelper.ReadUInt32(_stream, spawnPointBaseOffset + 0x1C)
+                };
+                var pointInVicinity = SpawnPoints.FirstOrDefault(point => // check if any other spawn points with the same type are close
+                    point.Type == spawnPoint.Type &&
+                    ((spawnPoint.X > point.X - 4 && spawnPoint.X < point.X + 4) ||
+                    (spawnPoint.Z > point.Z - 4 && spawnPoint.Z < point.Z + 4)));
+                if (pointInVicinity == null) SpawnPoints.Add(spawnPoint);
+                // Log.Msg($"Spawn point of type: {spawnPoint.Type} in {_filePath}");
             }
 
             for (var i = 0; i < mapPointCount; i++)
             {
                 var mapPointBaseOffset = mapPointOffset + (i * MapPointBlockSize);
-                var roadLookFlags = BitConverter.ToChar(_stream, mapPointBaseOffset + 0x01);
+                var roadLookFlags = MemoryHelper.ReadUint8(_stream, mapPointBaseOffset + 0x01);
                 var laneTypeFlags = (byte) (roadLookFlags & 0x0F);
                 var laneOffsetFlags = (byte)(roadLookFlags >> 4);
+                var controlNodeIndexFlags = MemoryHelper.ReadInt8(_stream, mapPointBaseOffset + 0x04);
                 int laneOffset;
                 switch (laneOffsetFlags)
                 {
@@ -92,12 +168,13 @@ namespace TsMap
                     case 5: laneOffset = 15; break;
                     case 6: laneOffset = 20; break;
                     case 7: laneOffset = 25; break;
-                    default: laneOffset = 1; break;
+                    default: laneOffset = 0; break;
 
                 }
                 int laneCount;
                 switch (laneTypeFlags) // TODO: Change these (not really used atm)
                 {
+                    case 0: laneCount = 1; break;
                     case 1: laneCount = 2; break;
                     case 2: laneCount = 4; break;
                     case 3: laneCount = 6; break;
@@ -106,16 +183,25 @@ namespace TsMap
                     case 6: laneCount = 7; break;
                     case 8: laneCount = 3; break;
                     case 13: laneCount = -1; break;
-                    case 14: laneCount = 0; break;
+                    case 14: laneCount = -2; break; // auto
                     default:
-                        laneCount = 0;
+                        laneCount = 1;
                         // Log.Msg($"Unknown LaneType: {laneTypeFlags}");
                         break;
                 }
+                sbyte controlNodeIndex = -1;
+                switch (controlNodeIndexFlags)
+                {
+                    case 1: controlNodeIndex = 0; break;
+                    case 2: controlNodeIndex = 1; break;
+                    case 4: controlNodeIndex = 2; break;
+                    case 8: controlNodeIndex = 3; break;
+                    case 16: controlNodeIndex = 4; break;
+                    case 32: controlNodeIndex = 5; break;
+                }
+                var prefabColorFlags = MemoryHelper.ReadUint8(_stream, mapPointBaseOffset + 0x02);
 
-                var prefabColorFlags = (byte)BitConverter.ToChar(_stream, mapPointBaseOffset + 0x02);
-
-                var navFlags = (byte)BitConverter.ToChar(_stream, mapPointBaseOffset + 0x05);
+                var navFlags = MemoryHelper.ReadUint8(_stream, mapPointBaseOffset + 0x05);
                 var hidden = (navFlags & 0x02) != 0; // Map Point is Control Node
 
                 var point = new TsMapPoint
@@ -124,18 +210,36 @@ namespace TsMap
                     LaneOffset = laneOffset,
                     Hidden = hidden,
                     PrefabColorFlags = prefabColorFlags,
-                    X = BitConverter.ToSingle(_stream, mapPointBaseOffset + 0x08),
-                    Z = BitConverter.ToSingle(_stream, mapPointBaseOffset + 0x10),
+                    X = MemoryHelper.ReadSingle(_stream, mapPointBaseOffset + 0x08),
+                    Z = MemoryHelper.ReadSingle(_stream, mapPointBaseOffset + 0x10),
                     Neighbours = new List<int>(),
-                    NeighbourCount = BitConverter.ToInt32(_stream, mapPointBaseOffset + 0x14 + (0x04 * 6))
+                    NeighbourCount = MemoryHelper.ReadInt32(_stream, mapPointBaseOffset + 0x14 + (0x04 * 6)),
+                    ControlNodeIndex = controlNodeIndex
                 };
 
                 for (var x = 0; x < point.NeighbourCount; x++)
                 {
-                    point.Neighbours.Add(BitConverter.ToInt32(_stream, mapPointBaseOffset + 0x14 + (x * 0x04)));
+                    point.Neighbours.Add(MemoryHelper.ReadInt32(_stream, mapPointBaseOffset + 0x14 + (x * 0x04)));
                 }
 
                 MapPoints.Add(point);
+            }
+
+            for (var i = 0; i < triggerPointCount; i++)
+            {
+                var triggerPointBaseOffset = triggerPointOffset + (i * TriggerPointBlockSize);
+                var triggerPoint = new TsTriggerPoint
+                {
+                    TriggerId = MemoryHelper.ReadUInt32(_stream, triggerPointBaseOffset),
+                    TriggerActionUid = MemoryHelper.ReadUInt64(_stream, triggerPointBaseOffset + 0x04),
+                    X = MemoryHelper.ReadSingle(_stream, triggerPointBaseOffset + 0x1C),
+                    Z = MemoryHelper.ReadSingle(_stream, triggerPointBaseOffset + 0x24),
+                };
+                var pointInVicinity = TriggerPoints.FirstOrDefault(point => // check if any other trigger points with the same id are close
+                    point.TriggerActionUid == triggerPoint.TriggerActionUid &&
+                    ((triggerPoint.X > point.X - 20 && triggerPoint.X < point.X + 20) ||
+                    (triggerPoint.Z > point.Z - 20 && triggerPoint.Z < point.Z + 20)));
+                if (pointInVicinity == null) TriggerPoints.Add(triggerPoint);
             }
 
             _stream = null;

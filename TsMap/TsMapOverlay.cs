@@ -1,8 +1,8 @@
 ﻿using System;
 using System.Drawing;
 using System.Drawing.Imaging;
-using System.IO;
 using System.Runtime.InteropServices;
+using TsMap.HashFiles;
 
 namespace TsMap
 {
@@ -76,9 +76,12 @@ namespace TsMap
 
         private Color8888[] _pixelData;
 
-        public OverlayIcon(string filePath)
+        private ScsFile _file;
+
+        public OverlayIcon(ScsFile file)
         {
-            _stream = File.ReadAllBytes(filePath);
+            _file = file;
+            _stream = file.Entry.Read();
             Parse();
         }
 
@@ -100,19 +103,20 @@ namespace TsMap
         {
             Valid = true;
             if (_stream.Length < 128 ||
-                BitConverter.ToUInt32(_stream, 0x00) != 0x20534444 ||
-                BitConverter.ToUInt32(_stream, 0x04) != 0x7C)
+                MemoryHelper.ReadUInt32(_stream, 0x00) != 0x20534444 ||
+                MemoryHelper.ReadUInt32(_stream, 0x04) != 0x7C)
             {
                 Valid = false;
                 Console.WriteLine("Invalid DDS file.");
                 return;
             }
-            Height = BitConverter.ToUInt32(_stream, 0x0C);
-            Width = BitConverter.ToUInt32(_stream, 0x10);
+            Height = MemoryHelper.ReadUInt32(_stream, 0x0C);
+            Width = MemoryHelper.ReadUInt32(_stream, 0x10);
 
-            var fourCc = BitConverter.ToUInt32(_stream, 0x54);
+            var fourCc = MemoryHelper.ReadUInt32(_stream, 0x54);
 
-            if (fourCc == 0x35545844) ParseDxt5();
+            if (fourCc == 861165636) ParseDxt3();
+            else if (fourCc == 894720068) ParseDxt5();
             else ParseUncompressed();
 
         }
@@ -122,7 +126,7 @@ namespace TsMap
             if ((_stream.Length - 128) / 4 < Width * Height)
             {
                 Valid = false;
-                Log.Msg("Invalid DDS file (size).");
+                Log.Msg($"Invalid DDS file (size), '{_file.GetPath()}'");
                 return;
             }
 
@@ -132,8 +136,53 @@ namespace TsMap
 
             for (var i = 0; i < Width * Height; i++)
             {
-                var rgba = BitConverter.ToUInt32(_stream, fileOffset += 0x04);
+                var rgba = MemoryHelper.ReadUInt32(_stream, fileOffset += 0x04);
                 _pixelData[i] = new Color8888((byte)((rgba >> 0x18) & 0xFF), (byte)((rgba >> 0x10) & 0xFF), (byte)((rgba >> 0x08) & 0xFF), (byte)(rgba & 0xFF));
+            }
+        }
+
+        private void ParseDxt3() // https://msdn.microsoft.com/en-us/library/windows/desktop/bb694531
+        {
+            var fileOffset = 0x80;
+            _pixelData = new Color8888[Width * Height];
+            for (var y = 0; y < Height; y += 4)
+            {
+
+                for (var x = 0; x < Width; x += 4)
+                {
+                    var baseOffset = fileOffset;
+
+                    var color0 = new Color565(BitConverter.ToUInt16(_stream, fileOffset += 0x08));
+                    var color1 = new Color565(BitConverter.ToUInt16(_stream, fileOffset += 0x02));
+
+                    var color2 = (double) 2 / 3 * color0 + (double) 1 / 3 * color1;
+                    var color3 = (double) 1 / 3 * color0 + (double) 2 / 3 * color1;
+
+                    var colors = new[]
+                    {
+                        new Color8888(color0, 0xFF), // bit code 00
+                        new Color8888(color1, 0xFF), // bit code 01
+                        new Color8888(color2, 0xFF), // bit code 10
+                        new Color8888(color3, 0xFF) // bit code 11
+                    };
+
+                    fileOffset += 0x02;
+                    for (var i = 0; i < 4; i++)
+                    {
+                        var colorRow = _stream[fileOffset + i];
+                        var alphaRow = BitConverter.ToUInt16(_stream, baseOffset + i * 2);
+
+                        for (var j = 0; j < 4; j++)
+                        {
+                            var colorIndex = (colorRow >> (j * 2)) & 3;
+                            var alpha = (alphaRow >> (j * 4)) & 15;
+                            var pos = y * Width + i * Width + x + j;
+                            _pixelData[pos] = colors[colorIndex];
+                            _pixelData[pos].SetAlpha((byte) (alpha / 15f * 255));
+                        }
+                    }
+                    fileOffset += 0x04;
+                }
             }
         }
 
@@ -171,7 +220,7 @@ namespace TsMap
                         alphas[7] = 255; // bit code 111
                     }
 
-                    var alphaTexelUlongData = BitConverter.ToUInt64(_stream, fileOffset += 0x01);
+                    var alphaTexelUlongData = MemoryHelper.ReadUInt64(_stream, fileOffset += 0x01);
 
                     var alphaTexelData =
                         alphaTexelUlongData & 0xFFFFFFFFFFFF; // remove 2 excess bytes (read 8 bytes only need 6)
@@ -187,8 +236,8 @@ namespace TsMap
                         }
                     }
 
-                    var color0 = new Color565(BitConverter.ToUInt16(_stream, fileOffset += 0x06));
-                    var color1 = new Color565(BitConverter.ToUInt16(_stream, fileOffset += 0x02));
+                    var color0 = new Color565(MemoryHelper.ReadUInt16(_stream, fileOffset += 0x06));
+                    var color1 = new Color565(MemoryHelper.ReadUInt16(_stream, fileOffset += 0x02));
 
                     var color2 = (double) 2 / 3 * color0 + (double) 1 / 3 * color1;
                     var color3 = (double) 1 / 3 * color0 + (double) 2 / 3 * color1;
@@ -201,7 +250,7 @@ namespace TsMap
                         new Color8888(color3, 0xFF) // bit code 11
                     };
 
-                    var colorTexelData = BitConverter.ToUInt32(_stream, fileOffset += 0x02);
+                    var colorTexelData = MemoryHelper.ReadUInt32(_stream, fileOffset += 0x02);
                     for (var j = 3; j >= 0; j--)
                     {
                         var colorTexelRowData = (colorTexelData >> (j * 0x08)) & 0xFF;
@@ -223,11 +272,16 @@ namespace TsMap
     {
         private readonly Bitmap _overlayBitmap;
 
-        public TsMapOverlay(string filePath)
+        private string _filePath;
+
+        public TsMapOverlay(TsMapper mapper, string filePath)
         {
-            if (File.Exists(filePath))
+            _filePath = filePath;
+            var file = mapper.Rfs.GetFileEntry(_filePath);
+
+            if (file != null)
             {
-                var icon = new OverlayIcon(filePath);
+                var icon = new OverlayIcon(file);
                 if (!icon.Valid) return;
 
                 _overlayBitmap = new Bitmap((int)icon.Width, (int)icon.Height, PixelFormat.Format32bppArgb);
